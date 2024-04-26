@@ -14,13 +14,25 @@ from langchain_community.tools.yahoo_finance_news import YahooFinanceNewsTool
 from langchain_community.utilities.google_finance import GoogleFinanceAPIWrapper
 from langchain_community.utilities import GoogleSearchAPIWrapper
 from langchain_core.tools import Tool
-
+from langchain.tools.render import format_tool_to_openai_function
+from langchain.agents.format_scratchpad.openai_tools import (
+    format_to_openai_tool_messages,
+)
+from langchain.agents.format_scratchpad import format_to_openai_functions
+from langchain.output_parsers import ResponseSchema,StructuredOutputParser
 from fastapi import FastAPI
 from langserve import add_routes
 from langchain.pydantic_v1 import BaseModel, Field
 from langchain_core.messages import BaseMessage
+from langchain_core.runnables import (
+    ConfigurableField,
+    RunnableLambda
+)
+
 from typing import List
 import uvicorn
+# from app.client import get_openai_response
+
 load_dotenv()
 
 ## API Keys
@@ -40,6 +52,8 @@ os.environ['TAVILY_API_KEY']= os.getenv("TAVILY_API_KEY")
 os.environ["LANGCHAIN_TRACING_V2"]="true"
 os.environ['LANGCHAIN_ENDPOINT'] = 'https://api.smith.langchain.com'
 os.environ["LANGCHAIN_API_KEY"] = os.getenv("LANGCHAIN_API_KEY") # where monitoring results needs to be stored
+
+## Response Schema
 
 ## Web-Search Tools
 
@@ -70,15 +84,26 @@ prompt = base_prompt.partial(instructions=instructions)
 
 
 ## LLM Model
-llm = ChatOpenAI(model="gpt-3.5-turbo-0125", temperature=0)
+llm = ChatOpenAI(model="gpt-3.5-turbo-0125", temperature=0).configurable_fields(
+    temperature=ConfigurableField(
+        id="llm_temperature",
+        name="LLM Temperature",
+        description="The temperature of the LLM",
+    )
+)
 
 
 ## Tools
 tools=[tavily_tool, google_tool, yahoo_tool, google_search_tool]
 
+## LLM with tools
+llm_with_tools = llm.bind(
+    functions=[format_tool_to_openai_function(t) for t in tools]
+).with_config({"run_name": "LLM"})
 
 ## Creating Agent and Agent Executor
 agent = create_openai_functions_agent(llm,tools,prompt)
+
 agent_executor = AgentExecutor(
     agent=agent,
     tools=tools,
@@ -91,7 +116,7 @@ class Input(BaseModel):
     
 
 class Output(BaseModel):
-    output: str
+    output: str = Field(description='content')
     
 
 app = FastAPI(
@@ -101,8 +126,9 @@ app = FastAPI(
 
 ## add routes
 add_routes(app, 
-           agent_executor.with_types(input_type=Input, output_type=Output), 
-           path='/stocks')
+           agent_executor.with_types(input_type=Input, output_type=Output).with_config(
+            {"run_name": "agent"}),
+            path='/stocks')
 
 if __name__=="__main__":
     uvicorn.run(app,host="localhost",port=8000)
